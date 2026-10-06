@@ -39,14 +39,17 @@ func name(s string) ast.Name {
 }
 
 func nameAttrib(s string, attribs ...string) ast.NameAttrib {
-	var attrib = ast.NoAttrib
+	var attrib *ast.DeclAttrib
 	if len(attribs) > 0 {
+		var attribType ast.DeclAttribType
 		switch attribs[0] {
 		case "close":
-			attrib = ast.CloseAttrib
+			attribType = ast.CloseAttrib
 		case "const":
-			attrib = ast.ConstAttrib
+			attribType = ast.ConstAttrib
 		}
+		declAttrib := ast.NewDeclAttrib(ast.Location{}, attribType)
+		attrib = &declAttrib
 	}
 	return ast.NameAttrib{Name: name(s), Attrib: attrib}
 }
@@ -1053,6 +1056,36 @@ func TestParser_Local(t *testing.T) {
 			input: `local x <foobar> = b`,
 			err:   Error{Got: tok(token.IDENT, "foobar"), Expected: "'const' or 'close'"},
 		},
+		{
+			name:  "local with prefix const attrib",
+			input: `local<const> x = 1`,
+			want: ast.LocalStat{
+				PrefixAttrib: &ast.DeclAttrib{Type: ast.ConstAttrib},
+				NameAttribs:  []ast.NameAttrib{nameAttrib("x")},
+				Values:       []ast.ExpNode{ast.NewInt(1)},
+			},
+			want1: tok(token.EOF, ""),
+		},
+		{
+			name:  "local with prefix const attrib multiple vars",
+			input: `local<const> x, y = 1, 2`,
+			want: ast.LocalStat{
+				PrefixAttrib: &ast.DeclAttrib{Type: ast.ConstAttrib},
+				NameAttribs:  []ast.NameAttrib{nameAttrib("x"), nameAttrib("y")},
+				Values:       []ast.ExpNode{ast.NewInt(1), ast.NewInt(2)},
+			},
+			want1: tok(token.EOF, ""),
+		},
+		{
+			name:  "local with prefix close attrib",
+			input: `local<close> x = b`,
+			want: ast.LocalStat{
+				PrefixAttrib: &ast.DeclAttrib{Type: ast.CloseAttrib},
+				NameAttribs:  []ast.NameAttrib{nameAttrib("x")},
+				Values:       []ast.ExpNode{name("b")},
+			},
+			want1: tok(token.EOF, ""),
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1307,6 +1340,18 @@ func TestParseChunk(t *testing.T) {
 			input:   "return ?",
 			wantErr: true,
 		},
+		{
+			name:  "local with prefix const",
+			input: "local<const> x = 1",
+			wantStat: ast.NewBlockStat(
+				[]ast.Stat{ast.LocalStat{
+					PrefixAttrib: &ast.DeclAttrib{Type: ast.ConstAttrib},
+					NameAttribs:  []ast.NameAttrib{nameAttrib("x")},
+					Values:       []ast.ExpNode{ast.NewInt(1)},
+				}},
+				nil,
+			),
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1355,6 +1400,136 @@ func TestParseExp(t *testing.T) {
 			}
 			if !reflect.DeepEqual(gotExp, tt.wantExp) {
 				t.Errorf("ParseExp() = %v, want %v", gotExp, tt.wantExp)
+			}
+		})
+	}
+}
+
+func TestParser_Global(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  ast.Stat
+		want1 *token.Token
+		err   interface{}
+	}{
+		{
+			name:  "global function definition",
+			input: "global function f(x) return x end",
+			want: ast.GlobalFunctionStat{
+				Name: name("f"),
+				Function: ast.Function{
+					Name: "f",
+					ParList: ast.ParList{
+						Params: []ast.Name{name("x")},
+					},
+					Body: ast.BlockStat{
+						Return: []ast.ExpNode{name("x")},
+					},
+				},
+			},
+			want1: tok(token.EOF, ""),
+		},
+		{
+			name:  "global function with no params",
+			input: "global function foo() end",
+			want: ast.GlobalFunctionStat{
+				Name: name("foo"),
+				Function: ast.Function{
+					Name: "foo",
+					Body: ast.BlockStat{Return: []ast.ExpNode{}},
+				},
+			},
+			want1: tok(token.EOF, ""),
+		},
+		{
+			name:  "global single variable declaration with no value",
+			input: "global x z",
+			want:  ast.GlobalStat{NameAttribs: []ast.NameAttrib{nameAttrib("x")}},
+			want1: tok(token.IDENT, "z"),
+		},
+		{
+			name:  "global 3 variables declaration with no value",
+			input: "global x, y, z",
+			want:  ast.GlobalStat{NameAttribs: []ast.NameAttrib{nameAttrib("x"), nameAttrib("y"), nameAttrib("z")}},
+			want1: tok(token.EOF, ""),
+		},
+		{
+			name:  "global 3 variables declaration with 1 value",
+			input: "global x, y, z = 123",
+			want: ast.GlobalStat{
+				NameAttribs: []ast.NameAttrib{nameAttrib("x"), nameAttrib("y"), nameAttrib("z")},
+				Values:      []ast.ExpNode{ast.NewInt(123)},
+			},
+			want1: tok(token.EOF, ""),
+		},
+		{
+			name:  "global 2 variables declaration with 3 values",
+			input: `global x, y = 123, "a", 'b'`,
+			want: ast.GlobalStat{
+				NameAttribs: []ast.NameAttrib{nameAttrib("x"), nameAttrib("y")},
+				Values:      []ast.ExpNode{ast.NewInt(123), str("a"), str("b")},
+			},
+			want1: tok(token.EOF, ""),
+		},
+		{
+			name:  "global with const attrib",
+			input: `global<const> x = 1`,
+			want: ast.GlobalStat{
+				PrefixAttrib: &ast.DeclAttrib{Type: ast.ConstAttrib},
+				NameAttribs:  []ast.NameAttrib{nameAttrib("x")},
+				Values:       []ast.ExpNode{ast.NewInt(1)},
+			},
+			want1: tok(token.EOF, ""),
+		},
+		{
+			name:  "global wildcard",
+			input: `global * end`,
+			want:  ast.GlobalWildcardStat{},
+			want1: tok(token.KwEnd, "end"),
+		},
+		{
+			name:  "global const wildcard",
+			input: `global<const> * end`,
+			want: ast.GlobalWildcardStat{
+				Attrib: &ast.DeclAttrib{Type: ast.ConstAttrib},
+			},
+			want1: tok(token.KwEnd, "end"),
+		},
+		{
+			name:  "global with invalid attrib",
+			input: `global<foobar> x = b`,
+			err:   Error{Got: tok(token.IDENT, "foobar"), Expected: "'const' or 'close'"},
+		},
+		{
+			name:  "global with close attrib (invalid)",
+			input: `global<close> x = b`,
+			want: ast.GlobalStat{
+				PrefixAttrib: &ast.DeclAttrib{Type: ast.CloseAttrib},
+				NameAttribs:  []ast.NameAttrib{nameAttrib("x")},
+				Values:       []ast.ExpNode{name("b")},
+			},
+			want1: tok(token.EOF, ""),
+			// Note: <close> on global is a semantic error caught during compilation,
+			// not a parse error, so the parser accepts it
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			defer func() {
+				r := recover()
+				if !reflect.DeepEqual(r, tt.err) {
+					t.Errorf("Parser.Global() error = %v, want %v", r, tt.err)
+				}
+			}()
+			p := &Parser{scanner: newTestScanner(tt.input)}
+			globalTok := p.Scan()
+			got, got1 := p.Global(globalTok, p.Scan())
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("Parser.Global() got = %v, want %v", got, tt.want)
+			}
+			if !reflect.DeepEqual(got1, tt.want1) {
+				t.Errorf("Parser.Global() got1 = %v, want %v", got1, tt.want1)
 			}
 		})
 	}

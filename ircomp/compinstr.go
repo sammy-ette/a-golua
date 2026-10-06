@@ -170,6 +170,11 @@ func (ic instrCompiler) ProcessMkTableInstr(m ir.MkTable) {
 	ic.Emit(opcode)
 }
 
+// ProcessMkVarargTableInstr compiles a MkVarargTable instruction.
+func (ic instrCompiler) ProcessMkVarargTableInstr(m ir.MkVarargTable) {
+	ic.Emit(code.MkVarargTable(ic.codeReg(m.Dst), ic.codeReg(m.Etc)))
+}
+
 // ProcessLookupInstr compiles a Lookup instruction.
 func (ic instrCompiler) ProcessLookupInstr(s ir.Lookup) {
 	opcode := code.LoadLookup(ic.codeReg(s.Dst), ic.codeReg(s.Table), ic.codeReg(s.Index))
@@ -178,8 +183,12 @@ func (ic instrCompiler) ProcessLookupInstr(s ir.Lookup) {
 
 // ProcessSetIndexInstr compiles a SetIndex instruction.
 func (ic instrCompiler) ProcessSetIndexInstr(s ir.SetIndex) {
-	opcode := code.SetIndex(ic.codeReg(s.Src), ic.codeReg(s.Table), ic.codeReg(s.Index))
-	ic.Emit(opcode)
+	tReg := ic.codeReg(s.Table)
+	iReg := ic.codeReg(s.Index)
+	if s.CheckNotDefined {
+		ic.Emit(code.CheckNotDefined(tReg, iReg))
+	}
+	ic.Emit(code.SetIndex(ic.codeReg(s.Src), tReg, iReg))
 }
 
 // ProcessReceiveInstr compiles a Receive instruction.
@@ -235,6 +244,7 @@ func (ic instrCompiler) ProcessPrepForLoopInstr(i ir.PrepForLoop) {
 func (ic instrCompiler) ProcessAdvForLoopInstr(i ir.AdvForLoop) {
 	ic.Emit(code.AdvForLoop(ic.codeReg(i.Start), ic.codeReg(i.Stop), ic.codeReg(i.Step)))
 }
+
 
 func (ic instrCompiler) ProcessTakeRegisterInstr(t ir.TakeRegister) {
 	ic.takeRegister(t.Reg)

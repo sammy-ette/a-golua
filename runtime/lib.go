@@ -25,6 +25,7 @@ func RawGet(t *Table, k Value) Value {
 }
 
 const maxIndexChainLength = 100
+const maxCallChainLength = 15 // Lua 5.5: limit __call metamethod chain
 
 // Index returns the item in a collection for the given key k, using the
 // '__index' metamethod if appropriate.
@@ -123,6 +124,15 @@ func Continue(t *Thread, f Value, next Cont) (Cont, error) {
 	if ok {
 		return callable.Continuation(t, next), nil
 	}
+	// Not callable, need to use __call metamethod
+	// Check if we've exceeded the chain limit (Lua 5.5)
+	if t.metacallChainDepth >= maxCallChainLength {
+		return nil, errors.New("'__call' chain too long")
+	}
+	// Increment chain depth before recursive call
+	t.metacallChainDepth++
+	defer func() { t.metacallChainDepth-- }()
+
 	cont, err, ok := metacont(t, f, "__call", next)
 	if !ok {
 		return nil, fmt.Errorf("attempt to call a %s value", f.CustomTypeName())
@@ -143,6 +153,15 @@ func Call(t *Thread, f Value, args []Value, next Cont) error {
 	if ok {
 		return t.call(callable, args, next)
 	}
+	// Not callable, need to use __call metamethod
+	// Check if we've exceeded the chain limit (Lua 5.5)
+	if t.metacallChainDepth >= maxCallChainLength {
+		return errors.New("'__call' chain too long")
+	}
+	// Increment chain depth before recursive call
+	t.metacallChainDepth++
+	defer func() { t.metacallChainDepth-- }()
+
 	err, ok := Metacall(t, f, "__call", append([]Value{f}, args...), next)
 	if ok {
 		return err
@@ -256,8 +275,18 @@ func (r *Runtime) SetEnvGoFunc(t *Table, name string, f GoFunctionFunc, nArgs in
 	return gof
 }
 
+// scannerOptions returns scanner options based on the runtime configuration.
+func (r *Runtime) scannerOptions() []scanner.Option {
+	var opts []scanner.Option
+	if r.reservedGlobal {
+		opts = append(opts, scanner.WithReservedGlobal())
+	}
+	return opts
+}
+
 // ParseLuaChunk parses a string as a Lua statement and returns the AST.
 func (r *Runtime) ParseLuaChunk(name string, source []byte, scannerOptions ...scanner.Option) (stat *ast.BlockStat, statSize uint64, err error) {
+	scannerOptions = append(r.scannerOptions(), scannerOptions...)
 	s := scanner.New(name, source, scannerOptions...)
 
 	// Account for CPU and memory used to make the AST.  This is an estimate,
@@ -280,6 +309,7 @@ func (r *Runtime) ParseLuaChunk(name string, source []byte, scannerOptions ...sc
 
 // ParseLuaExp parses a string as a Lua expression and returns the AST.
 func (r *Runtime) ParseLuaExp(name string, source []byte, scannerOptions ...scanner.Option) (stat *ast.BlockStat, statSize uint64, err error) {
+	scannerOptions = append(r.scannerOptions(), scannerOptions...)
 	s := scanner.New(name, source, scannerOptions...)
 
 	// Account for CPU and memory used to make the AST.  This is an estimate,

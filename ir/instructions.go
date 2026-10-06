@@ -35,6 +35,7 @@ type InstrProcessor interface {
 	ProcessMkContInstr(MkCont)
 	ProcessClearRegInstr(ClearReg)
 	ProcessMkTableInstr(MkTable)
+	ProcessMkVarargTableInstr(MkVarargTable)
 	ProcessLookupInstr(Lookup)
 	ProcessSetIndexInstr(SetIndex)
 	ProcessReceiveInstr(Receive)
@@ -303,6 +304,33 @@ func (m MkTable) String() string {
 	return fmt.Sprintf("%s := mktable()", m.Dst)
 }
 
+// MkVarargTable creates a table whose array part points to the vararg data in Etc.
+// This allows modifications to the table to affect what ... expands to (Lua 5.5 semantics).
+type MkVarargTable struct {
+	Dst Register
+	Etc Register
+}
+
+// ProcessInstr makes the InstrProcessor process this instruction.
+func (m MkVarargTable) ProcessInstr(p InstrProcessor) {
+	p.ProcessMkVarargTableInstr(m)
+}
+
+func (m MkVarargTable) String() string {
+	return fmt.Sprintf("%s := mkvargtable(%s)", m.Dst, m.Etc)
+}
+
+// DestReg returns the destination register of this instruction.
+func (m MkVarargTable) DestReg() Register {
+	return m.Dst
+}
+
+// WithDestReg returns the same instruction with a new destination register.
+func (m MkVarargTable) WithDestReg(dst Register) Instruction {
+	m.Dst = dst
+	return m
+}
+
 // Lookup finds the value associated with the key Index in Table and puts it in
 // Dst.
 type Lookup struct {
@@ -332,10 +360,14 @@ func (s Lookup) String() string {
 }
 
 // SetIndex associates Index with Src in the table Table.
+// If CheckNotDefined is true, a runtime check is performed first: if
+// Table[Index] is already non-nil, a "global 'name' already defined" error
+// is raised.  This implements Lua 5.5's global redefinition check.
 type SetIndex struct {
-	Table Register
-	Index Register
-	Src   Register
+	Table           Register
+	Index           Register
+	Src             Register
+	CheckNotDefined bool
 }
 
 // ProcessInstr makes the InstrProcessor process this instruction.

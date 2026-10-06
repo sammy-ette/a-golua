@@ -6,6 +6,8 @@ import (
 	"github.com/arnodel/golua/ops"
 )
 
+const globalAttribError = "only <const> is allowed for global declarations"
+
 //
 // Statement compilation
 //
@@ -61,7 +63,8 @@ func (c *compiler) ProcessForInStat(s ast.ForInStat) {
 
 	nameAttribs := make([]ast.NameAttrib, len(s.Vars))
 	for i, name := range s.Vars {
-		nameAttribs[i] = ast.NewNameAttrib(name, nil, ast.NoAttrib)
+		constDeclAttrib := ast.NewDeclAttrib(ast.Location{}, ast.ConstAttrib)
+		nameAttribs[i] = ast.NewNameAttrib(name, &constDeclAttrib) // Loop variables are read-only in Lua 5.5
 	}
 	c.CompileStat(ast.LocalStat{
 		NameAttribs: nameAttribs,
@@ -143,6 +146,7 @@ func (c *compiler) ProcessForStat(s ast.ForStat) {
 	// iter <- start
 	ir.EmitMoveNoLine(c.CodeBuilder, iterReg, startReg)
 	c.DeclareLocal(ir.Name(s.Var.Val), iterReg)
+	c.MarkConstantReg(iterReg) // Loop variable is read-only in Lua 5.5
 	c.compileBlock(s.Body)
 	c.PopContext()
 
@@ -228,19 +232,101 @@ func (c *compiler) ProcessLocalStat(s ast.LocalStat) {
 	c.compileExpList(s.Values, localRegs)
 	for i, reg := range localRegs {
 		c.ReleaseRegister(reg)
-		c.DeclareLocal(ir.Name(s.NameAttribs[i].Name.Val), reg)
-		switch s.NameAttribs[i].Attrib {
-		case ast.NoAttrib:
-			// Nothing to do
-		case ast.ConstAttrib:
-			c.MarkConstantReg(reg)
-		case ast.CloseAttrib:
-			c.MarkConstantReg(reg)
-			c.PushCloseAction(reg)
-		default:
-			panic(compilerBug{})
+		nameAttrib := s.NameAttribs[i]
+		c.DeclareLocal(ir.Name(nameAttrib.Name.Val), reg)
+		attrib := nameAttrib.Attrib
+		if attrib == nil {
+			attrib = s.PrefixAttrib
+		}
+		if attrib != nil {
+			switch attrib.Type {
+			case ast.ConstAttrib:
+				c.MarkConstantReg(reg)
+			case ast.CloseAttrib:
+				c.MarkConstantReg(reg)
+				c.PushCloseAction(reg)
+			default:
+				panic(compilerBug{})
+			}
 		}
 	}
+}
+
+// ProcessGlobalFunctionStat compiles a GlobalFunctionStat.
+func (c *compiler) ProcessGlobalFunctionStat(s ast.GlobalFunctionStat) {
+	checkGlobalName(s.Name)
+	// First, declare the global (as mutable, since function values can be reassigned)
+	c.DeclareGlobal(ir.Name(s.Name.Val), ir.MutableGlobal)
+
+	// Compile the function and assign it to the global
+	fReg := c.GetFreeRegister()
+	c.compileExpInto(s.Function, fReg)
+	c.TakeRegister(fReg)
+
+	// Check that the global is not already defined, then assign via _ENV
+	lvals := []ast.Var{globalVar(s.Name)}
+	c.compileDefineAssignments(lvals, []ir.Register{fReg})
+}
+
+// ProcessGlobalStat compiles a GlobalStat.
+func (c *compiler) ProcessGlobalStat(s ast.GlobalStat) {
+	if s.PrefixAttrib != nil && s.PrefixAttrib.Type != ast.ConstAttrib {
+		panic(Error{Where: s.PrefixAttrib, Message: globalAttribError})
+	}
+
+	// Compile the values BEFORE declaring the globals, so that RHS expressions
+	// like "global a = a" correctly read any local 'a' from outer scope.
+	var valueRegs []ir.Register
+	if len(s.Values) > 0 {
+		valueRegs = make([]ir.Register, len(s.NameAttribs))
+		c.compileExpList(s.Values, valueRegs)
+	}
+
+	// Check that _ENV is not being declared as a global
+	for _, nameAttrib := range s.NameAttribs {
+		checkGlobalName(nameAttrib.Name)
+	}
+
+	// Now register the global declarations
+	for _, nameAttrib := range s.NameAttribs {
+		var declType ir.GlobalDeclType
+		attrib := nameAttrib.Attrib
+		if attrib == nil {
+			attrib = s.PrefixAttrib
+		}
+		if attrib != nil {
+			if attrib.Type != ast.ConstAttrib {
+				panic(Error{Where: attrib, Message: globalAttribError})
+			}
+			declType = ir.ConstGlobal
+		} else {
+			declType = ir.MutableGlobal
+		}
+		c.DeclareGlobal(ir.Name(nameAttrib.Name.Val), declType)
+	}
+
+	// Handle value assignments (to globals via _ENV)
+	if len(valueRegs) > 0 {
+		lvals := make([]ast.Var, len(s.NameAttribs))
+		for i, nameAttrib := range s.NameAttribs {
+			lvals[i] = globalVar(nameAttrib.Name)
+		}
+		c.compileDefineAssignments(lvals, valueRegs)
+	}
+}
+
+// ProcessGlobalWildcardStat compiles a GlobalWildcardStat.
+func (c *compiler) ProcessGlobalWildcardStat(s ast.GlobalWildcardStat) {
+	var declType ir.GlobalDeclType
+	if s.Attrib != nil {
+		if s.Attrib.Type != ast.ConstAttrib {
+			panic(Error{Where: s.Attrib, Message: globalAttribError})
+		}
+		declType = ir.ConstGlobal
+	} else {
+		declType = ir.MutableGlobal
+	}
+	c.SetGlobalWildcard(declType)
 }
 
 // ProcessRepeatStat compiles a RepeatStat.
@@ -386,4 +472,12 @@ func (c *compiler) getTailCall(rtn []ast.ExpNode) (ast.FunctionCall, bool) {
 	}
 	fc, ok := rtn[0].(ast.FunctionCall)
 	return fc, ok
+}
+
+// checkGlobalName panics with a compile error if name is not valid for a
+// global declaration.
+func checkGlobalName(name ast.Name) {
+	if name.Val == "_ENV" {
+		panic(Error{Where: name, Message: "'_ENV' cannot be declared as a global variable"})
+	}
 }

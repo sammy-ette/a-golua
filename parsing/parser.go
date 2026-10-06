@@ -4,11 +4,10 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/arnodel/golua/ast"
 	"github.com/arnodel/golua/luastrings"
 	"github.com/arnodel/golua/ops"
 	"github.com/arnodel/golua/token"
-
-	"github.com/arnodel/golua/ast"
 )
 
 // Parser can parse lua statements or expressions
@@ -59,7 +58,7 @@ func ParseExp(scanner Scanner) (exp ast.ExpNode, err error) {
 			}
 		}
 	}()
-	parser := &Parser{scanner}
+	parser := &Parser{scanner: scanner}
 	var t *token.Token
 	exp, t = parser.Exp(parser.Scan())
 	expectType(t, token.EOF, "<eof>")
@@ -79,7 +78,7 @@ func ParseChunk(scanner Scanner) (stat ast.BlockStat, err error) {
 			}
 		}
 	}()
-	parser := &Parser{scanner}
+	parser := &Parser{scanner: scanner}
 	var t *token.Token
 	stat, t = parser.Block(parser.Scan())
 	expectType(t, token.EOF, "<eof>")
@@ -129,35 +128,60 @@ func (p *Parser) Stat(t *token.Token) (ast.Stat, *token.Token) {
 		return p.FunctionStat(t)
 	case token.KwLocal:
 		return p.Local(t)
+	case token.KwGlobal:
+		// Reserved mode: scanner emitted KwGlobal, dispatch directly.
+		return p.Global(t, p.Scan())
 	case token.SgDoubleColon:
 		name, t := p.Name(p.Scan())
 		expectType(t, token.SgDoubleColon, "'::'")
 		return ast.NewLabelStat(name), p.Scan()
 	default:
+		// Context-sensitive "global" keyword: "global" is a soft keyword
+		// that starts a declaration only when followed by a token that
+		// cannot continue a prefix expression statement (IDENT, function,
+		// *, or <). Otherwise it is treated as a regular variable name.
+		if t.Type == token.IDENT && string(t.Lit) == "global" {
+			next := p.Scan()
+			switch next.Type {
+			case token.IDENT, token.KwFunction, token.SgStar, token.SgLess:
+				return p.Global(t, next)
+			default:
+				// "global" is a variable name; continue as prefix expression
+				exp, t := p.prefixExpTail(ast.NewName(t), next)
+				return p.prefixExpStat(exp, t)
+			}
+		}
 		var exp ast.ExpNode
 		exp, t = p.PrefixExp(t)
-		switch e := exp.(type) {
-		case ast.Stat:
-			// This is a function call
-			return e, t
-		case ast.Var:
-			// This should be the start of 'varlist = explist'
-			vars := []ast.Var{e}
-			var pexp ast.ExpNode
-			for t.Type == token.SgComma {
-				pexp, t = p.PrefixExp(p.Scan())
-				if v, ok := pexp.(ast.Var); ok {
-					vars = append(vars, v)
-				} else {
-					tokenError(t, "expected variable")
-				}
+		return p.prefixExpStat(exp, t)
+	}
+	return nil, nil
+}
+
+// prefixExpStat finishes parsing a statement that started as a prefix
+// expression — either a function call or an assignment.
+func (p *Parser) prefixExpStat(exp ast.ExpNode, t *token.Token) (ast.Stat, *token.Token) {
+	switch e := exp.(type) {
+	case ast.Stat:
+		// This is a function call
+		return e, t
+	case ast.Var:
+		// This should be the start of 'varlist = explist'
+		vars := []ast.Var{e}
+		var pexp ast.ExpNode
+		for t.Type == token.SgComma {
+			pexp, t = p.PrefixExp(p.Scan())
+			if v, ok := pexp.(ast.Var); ok {
+				vars = append(vars, v)
+			} else {
+				tokenError(t, "expected variable")
 			}
-			expectType(t, token.SgAssign, "'='")
-			exps, t := p.ExpList(p.Scan())
-			return ast.NewAssignStat(vars, exps), t
-		default:
-			tokenError(t, "")
 		}
+		expectType(t, token.SgAssign, "'='")
+		exps, t := p.ExpList(p.Scan())
+		return ast.NewAssignStat(vars, exps), t
+	default:
+		tokenError(t, "")
 	}
 	return nil, nil
 }
@@ -243,18 +267,65 @@ func (p *Parser) Local(*token.Token) (ast.Stat, *token.Token) {
 		fx, t := p.FunctionDef(t)
 		return ast.NewLocalFunctionStat(name, fx), t
 	}
-	// local namelist ['=' explist]
-	nameAttrib, t := p.NameAttrib(t)
-	nameAttribs := []ast.NameAttrib{nameAttrib}
-	for t.Type == token.SgComma {
-		nameAttrib, t = p.NameAttrib(p.Scan())
+	// local [<attrib>] namelist ['=' explist]
+	prefixAttrib, t := p.DeclAttrib(t)
+
+	var nameAttribs []ast.NameAttrib
+	var nameAttrib ast.NameAttrib
+	for {
+		nameAttrib, t = p.NameAttrib(t)
 		nameAttribs = append(nameAttribs, nameAttrib)
+		if t.Type != token.SgComma {
+			break
+		}
+		t = p.Scan() // Consume comma
 	}
+
 	var values []ast.ExpNode
 	if t.Type == token.SgAssign {
 		values, t = p.ExpList(p.Scan())
 	}
-	return ast.NewLocalStat(nameAttribs, values), t
+	return ast.NewLocalStat(prefixAttrib, nameAttribs, values), t
+}
+
+// Global parses a "global" statement (variable declaration or function definition).
+// It assumes that globalTok is the "global" token and t is the next token
+// (already scanned by the caller for context-sensitive disambiguation).
+func (p *Parser) Global(globalTok *token.Token, t *token.Token) (ast.Stat, *token.Token) {
+	if t.Type == token.KwFunction {
+		name, t := p.Name(p.Scan())
+		fx, t := p.FunctionDef(t)
+		return ast.NewGlobalFunctionStat(name, fx), t
+	}
+
+	prefixAttrib, t := p.DeclAttrib(t)
+
+	if t.Type == token.SgStar {
+		return ast.NewGlobalWildcardStat(ast.LocFromToken(globalTok), prefixAttrib), p.Scan()
+	}
+
+	var nameAttribs []ast.NameAttrib
+	var nameAttrib ast.NameAttrib
+	for {
+		nameAttrib, t = p.NameAttrib(t)
+		nameAttribs = append(nameAttribs, nameAttrib)
+		if t.Type != token.SgComma {
+			break
+		}
+		t = p.Scan()
+	}
+
+	var values []ast.ExpNode
+	if t.Type == token.SgAssign {
+		values, t = p.ExpList(p.Scan())
+	}
+	return ast.NewGlobalStat(prefixAttrib, nameAttribs, values), t
+}
+
+func (p *Parser) NameAttrib(t *token.Token) (ast.NameAttrib, *token.Token) {
+	name, t := p.Name(t)
+	attrib, t := p.DeclAttrib(t)
+	return ast.NewNameAttrib(name, attrib), t
 }
 
 // FunctionStat parses a function definition statement. It assumes that t is the
@@ -353,8 +424,8 @@ func (p *Parser) Exp(t *token.Token) (ast.ExpNode, *token.Token) {
 	return last.exp, t
 }
 
-// ShortExp parses an expression which is either atomic, a unary operation, a
-// prefix expression or a power operation (right associatively composed). In
+// ShortExp parses an expression which is either atomic, a unary operation,
+// a prefix expression or a power operation (right associatively composed). In
 // other words, any expression that doesn't contain a binary operator.
 func (p *Parser) ShortExp(t *token.Token) (ast.ExpNode, *token.Token) {
 	var exp ast.ExpNode
@@ -445,6 +516,7 @@ func (p *Parser) FunctionDef(startTok *token.Token) (ast.Function, *token.Token)
 	t := p.Scan()
 	var names []ast.Name
 	hasEtc := false
+	var varargName *ast.Name
 ParamsLoop:
 	for {
 		switch t.Type {
@@ -458,6 +530,11 @@ ParamsLoop:
 		case token.SgEtc:
 			hasEtc = true
 			t = p.Scan()
+			if t.Type == token.IDENT {
+				name := ast.NewName(t)
+				varargName = &name
+				t = p.Scan()
+			}
 			break ParamsLoop
 		case token.SgCloseBkt:
 			break ParamsLoop
@@ -468,11 +545,11 @@ ParamsLoop:
 	expectType(t, token.SgCloseBkt, "')'")
 	body, endTok := p.Block(p.Scan())
 	expectType(endTok, token.KwEnd, "'end'")
-	def := ast.NewFunction(startTok, endTok, ast.NewParList(names, hasEtc), body)
+	def := ast.NewFunction(startTok, endTok, ast.NewParList(names, hasEtc, varargName), body)
 	return def, p.Scan()
 }
 
-// PrefixExp parses an expression made of a name or and expression in brackets
+// PrefixExp parses an expression made of a name or an expression in brackets
 // followed by zero or more indexing operations or function applications.
 func (p *Parser) PrefixExp(t *token.Token) (ast.ExpNode, *token.Token) {
 	var exp ast.ExpNode
@@ -488,7 +565,13 @@ func (p *Parser) PrefixExp(t *token.Token) (ast.ExpNode, *token.Token) {
 	default:
 		tokenError(t, "")
 	}
-	t = p.Scan()
+	return p.prefixExpTail(exp, p.Scan())
+}
+
+// prefixExpTail parses the suffix chain (indexing, method calls, function
+// calls) of a prefix expression. exp is the already-parsed head and t is the
+// first token after it.
+func (p *Parser) prefixExpTail(exp ast.ExpNode, t *token.Token) (ast.ExpNode, *token.Token) {
 	for {
 		switch t.Type {
 		case token.SgOpenSquareBkt:
@@ -610,26 +693,36 @@ func (p *Parser) Name(t *token.Token) (ast.Name, *token.Token) {
 	return ast.NewName(t), p.Scan()
 }
 
-func (p *Parser) NameAttrib(t *token.Token) (ast.NameAttrib, *token.Token) {
-	name, t := p.Name(t)
-	attrib := ast.NoAttrib
-	var attribName *ast.Name
-	if t.Type == token.SgLess {
-		attribTok := p.Scan()
-		attribName = new(ast.Name)
-		*attribName, t = p.Name(attribTok)
-		switch attribName.Val {
-		case "const":
-			attrib = ast.ConstAttrib
-		case "close":
-			attrib = ast.CloseAttrib
-		default:
-			tokenError(attribTok, "'const' or 'close'")
-		}
-		expectType(t, token.SgGreater, "'>'")
-		t = p.Scan()
+// DeclAttrib parses an optional declaration attribute like <const> or <close>
+// Returns nil if no attribute is present
+func (p *Parser) DeclAttrib(t *token.Token) (*ast.DeclAttrib, *token.Token) {
+	if t.Type != token.SgLess {
+		return nil, t
 	}
-	return ast.NewNameAttrib(name, attribName, attrib), t
+
+	// Parse "<attrib>"
+	lessTok := t
+	attribTok := p.Scan()
+	expectIdent(attribTok)
+	attribName := string(attribTok.Lit)
+
+	var attribType ast.DeclAttribType
+	switch attribName {
+	case "const":
+		attribType = ast.ConstAttrib
+	case "close":
+		attribType = ast.CloseAttrib
+	default:
+		tokenError(attribTok, "'const' or 'close'")
+	}
+
+	greaterTok := p.Scan()
+	expectType(greaterTok, token.SgGreater, "'>'")
+
+	// Location is from '<' to '>'
+	loc := ast.MergeLocations(ast.LocFromToken(lessTok), ast.LocFromToken(greaterTok))
+	attrib := ast.NewDeclAttrib(loc, attribType)
+	return &attrib, p.Scan()
 }
 
 func expectIdent(t *token.Token) {

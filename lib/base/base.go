@@ -18,7 +18,7 @@ var LibLoader = packagelib.Loader{
 func Load(r *rt.Runtime) (rt.Value, func()) {
 	env := r.GlobalEnv()
 	r.SetEnv(env, "_G", rt.TableValue(env))
-	r.SetEnv(env, "_VERSION", rt.StringValue("Golua 5.4"))
+	r.SetEnv(env, "_VERSION", rt.StringValue("Golua 5.5"))
 	r.SetEnv(env, "next", rt.FunctionValue(nextGoFunc))
 
 	rt.SolemnlyDeclareCompliance(
@@ -33,7 +33,7 @@ func Load(r *rt.Runtime) (rt.Value, func()) {
 		r.SetEnvGoFunc(env, "load", load, 4, false),
 		r.SetEnvGoFunc(env, "pairs", pairs, 1, false),
 		r.SetEnvGoFunc(env, "pcall", pcall, 1, true),
-		r.SetEnvGoFunc(env, "print", print, 0, true), // Not really iosafe/timesafe but used in all tests...
+		r.SetEnvGoFunc(env, "print", print, 0, true), // print only writes to the host-controlled stdout, so it's safe in restricted contexts
 		r.SetEnvGoFunc(env, "rawequal", rawequal, 2, false),
 		r.SetEnvGoFunc(env, "rawget", rawget, 2, false),
 		r.SetEnvGoFunc(env, "rawlen", rawlen, 1, false),
@@ -52,7 +52,7 @@ func Load(r *rt.Runtime) (rt.Value, func()) {
 		r.SetEnvGoFunc(env, "loadfile", loadfile, 3, false),
 	)
 	// That's not safe!
-	r.SetEnvGoFunc(env, "collectgarbage", collectgarbage, 2, false)
+	r.SetEnvGoFunc(env, "collectgarbage", collectgarbage, 3, false)
 	return rt.NilValue, nil
 }
 

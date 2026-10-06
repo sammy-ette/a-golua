@@ -4,19 +4,21 @@ package ast
 // list of local variables.
 type LocalStat struct {
 	Location
-	NameAttribs []NameAttrib
-	Values      []ExpNode
+	PrefixAttrib *DeclAttrib
+	NameAttribs  []NameAttrib
+	Values       []ExpNode
 }
 
 var _ Stat = LocalStat{}
 
 // NewLocalStat returns a LocalStat instance defining the given names with the
 // given values.
-func NewLocalStat(nameAttribs []NameAttrib, values []ExpNode) LocalStat {
-	loc := MergeLocations(nameAttribs[0], nameAttribs[len(nameAttribs)-1])
-	if len(values) > 0 {
-		loc = MergeLocations(loc, values[len(values)-1])
-	}
+func NewLocalStat(prefixAttrib *DeclAttrib, nameAttribs []NameAttrib, values []ExpNode) LocalStat {
+	var loc Location = mergeLocationsOf(
+		optLocation(prefixAttrib),
+		sliceLocation(nameAttribs),
+		sliceLocation(values),
+	)
 	// Give a name to functions defined here if possible
 	for i, v := range values {
 		if i >= len(nameAttribs) {
@@ -28,7 +30,12 @@ func NewLocalStat(nameAttribs []NameAttrib, values []ExpNode) LocalStat {
 			values[i] = f
 		}
 	}
-	return LocalStat{Location: loc, NameAttribs: nameAttribs, Values: values}
+	return LocalStat{
+		Location:     loc,
+		PrefixAttrib: prefixAttrib,
+		NameAttribs:  nameAttribs,
+		Values:       values,
+	}
 }
 
 // ProcessStat uses the given StatProcessor to process the receiver.
@@ -52,30 +59,19 @@ func (s LocalStat) HWrite(w HWriter) {
 	w.Dedent()
 }
 
-// LocalAttrib is the type of a local name attrib
-type LocalAttrib uint8
-
-// Valid values for LocalAttrib
-const (
-	NoAttrib    LocalAttrib = iota
-	ConstAttrib             // <const>, introduced in Lua 5.4
-	CloseAttrib             // <close>, introduced in Lua 5.4
-)
-
-// A NameAttrib is a name introduce by a local definition, together with an
+// A NameAttrib is a name introduced by a declaration, together with an
 // optional attribute (in Lua 5.4 that is 'close' or 'const').
 type NameAttrib struct {
 	Location
 	Name   Name
-	Attrib LocalAttrib
+	Attrib *DeclAttrib // nil if no attribute
 }
 
-// NewNameAttrib returns a new NameAttribe for the given name and attrib.
-func NewNameAttrib(name Name, attribName *Name, attrib LocalAttrib) NameAttrib {
+// NewNameAttrib returns a new NameAttrib for the given name and attrib.
+func NewNameAttrib(name Name, attrib *DeclAttrib) NameAttrib {
 	loc := name.Location
-	if attribName != nil {
-		loc = MergeLocations(loc, attribName)
-
+	if attrib != nil {
+		loc = MergeLocations(loc, attrib)
 	}
 	return NameAttrib{
 		Location: loc,

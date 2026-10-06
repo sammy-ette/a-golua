@@ -4,9 +4,11 @@
 
 # GoLua
 
-Implementation of Lua **5.4** in Go with **no third party dependencies**. The
+Implementation of Lua **5.5** in Go with **no third party dependencies**. The
 compiler and runtime are complete (including coroutines), the standard Lua
 library is mostly implemented.
+
+**Note**: This is the `lua5.5` branch implementing Lua 5.5. For the Lua 5.4 implementation, see the [`lua5.4` branch](https://github.com/arnodel/golua/tree/lua5.4).
 
 - [GoLua](#golua)
 	- [Quick start: running golua](#quick-start-running-golua)
@@ -22,7 +24,7 @@ library is mostly implemented.
 		- [IR → Code Compilation](#ir--code-compilation)
 		- [Runtime](#runtime)
 		- [Test Suite](#test-suite)
-		- [The "official" Lua 5.4.3 Test Suite](#the-official-lua-543-test-suite)
+		- [The "official" Lua Test Suite](#the-official-lua-test-suite)
 		- [Standard Library](#standard-library)
 
 ## Quick start: running golua
@@ -290,6 +292,14 @@ Go applications. It should be able to run any pure Lua code
 - The lexer is implemented in the package `scanner`.
 - The parser is hand-written and implemented in the `parsing` package.
 
+The Lua 5.5 `global` keyword is treated as a context-sensitive "soft" keyword by
+default (matching the reference Lua behavior when `LUA_COMPAT_GLOBAL` is
+defined). In this mode the scanner emits `global` as a regular identifier, and
+the parser recognizes it as a keyword only at the start of a statement when
+followed by a name, `function`, `*`, or `<`. This allows `global` to be used as
+a variable name in existing code. The scanner can be configured to treat
+`global` as a reserved keyword instead (see Runtime section).
+
 ### AST → IR Compilation
 
 The `ast` package defines all the AST nodes.  The `astcomp` package defines a
@@ -313,6 +323,20 @@ resumed, the various runtime data types (e.g. `String`, `Int`...). The
 bytecode interpreter is implemented in the `RunInThread` method of the
 `LuaCont` data type.
 
+The `global` keyword can be made reserved (disallowing its use as a variable or
+function name) with the `WithReservedGlobal` runtime option. This propagates to
+`load()` and all other compilation paths automatically.
+
+```go
+r := rt.New(os.Stdout, rt.WithReservedGlobal())
+```
+
+On the command line, pass the `-G` flag:
+
+```sh
+$ golua -G myfile.lua
+```
+
 ### Test Suite
 
 There is a framework for running lua tests in the package `luatesting`. In the
@@ -333,24 +357,21 @@ print("ababab")
 Most of the code is covered with such Lua tests. Specific packages or functions
 are covered with Go tests.
 
-### The "official" Lua 5.4.3 Test Suite
+### The "official" Lua Test Suite
 
-Lua provides a test suites for each version (https://www.lua.org/tests/).  There
-is an adapted version of the 5.4.3 tests
-[here](https://github.com/arnodel/golua-tests/pull/3) which is supposed to be
-passed by the latest version of Golua.  It is the form of a PR so that the
-difference with the original test suite can be seen easily.
+Lua provides test suites for each version (https://www.lua.org/tests/).
 
-Assuming `golua` is installed on your system, those tests can be run from the
-root of the repository above as follows.
+The `lua5.4` branch passes an adapted version of the 5.4.3 test suite, available
+[here](https://github.com/arnodel/golua-tests/pull/3). The adaptations are shown
+as a PR so the differences from the original suite can be seen easily.
 
-```sh
-golua -u -e "_U=true" all.lua
-```
-
-For the moment `db.lua` is disabled (the file testing the debug module).  All
-other "soft" tests are run, some with adaptations.  The most significant
-differences are in error messages.
+The `lua5.5` branch (this branch) passes an adapted version of the Lua 5.5 test
+suite, available on the
+[`golua-5.5` branch](https://github.com/arnodel/golua-tests/tree/golua-5.5).
+Some tests are skipped or adapted because they are C-specific or verify
+implementation details of the reference C implementation rather than language
+semantics. See [CONFORMANCE.md](CONFORMANCE.md) for a detailed list of known
+behavioral differences and their status.
 
 ### Standard Library
 

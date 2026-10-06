@@ -25,7 +25,8 @@ type Runtime struct {
 	gcThread   *Thread   // Thread for running Lua finalizers
 	registry   *Table    // The registry table can store data global to the runtime
 
-	warner Warner // Lua 5.4 introduces a warning system, implemented by this
+	warner         Warner // Lua 5.4 introduces a warning system, implemented by this
+	reservedGlobal bool   // when true, "global" is a reserved keyword (LUA_COMPAT_GLOBAL off)
 
 	// This has an almost empty implementation when the noquotas build tag is
 	// set.  It should allow the compiler to compile away almost all runtime
@@ -33,32 +34,30 @@ type Runtime struct {
 	runtimeContextManager
 
 	// Object pools used to minimise the overhead of Go memory management.
-
-	// Register pools, disabled with the noregpool build tag.
-	regPool  valuePool
-	argsPool valuePool
-	cellPool cellPool
-
-	// Continuation pools, disable with the nocontpool build tag.
-	luaContPool luaContPool
-	goContPool  goContPool
+	regPool     valuePool   // Reuses register arrays ([]Value).
+	argsPool    valuePool   // Reuses argument arrays ([]Value).
+	cellPool    cellPool    // Reuses upvalue cells ([]Cell).
+	luaContPool luaContPool // Reuses Lua continuations.
+	goContPool  goContPool  // Reuses Go continuations.
 }
 
 type runtimeOptions struct {
 	regPoolSize       uint
 	regSetMaxAge      uint
+	reservedGlobal    bool
 	runtimeContextDef *RuntimeContextDef
+	poolFactory       func() luagc.Pool
 }
 
 var defaultRuntimeOptions = runtimeOptions{
-	regPoolSize:  10,
-	regSetMaxAge: 10,
+	regPoolSize:  regPoolSize,
+	regSetMaxAge: regSetMaxAge,
 }
 
 // A RuntimeOption configures the Runtime.
 type RuntimeOption func(*runtimeOptions)
 
-// WithRegPoolSize set the size of register pool when creating a new Runtime.
+// WithRegPoolSize sets the size of register pools when creating a new Runtime.
 // The default register pool size is 10.
 func WithRegPoolSize(sz uint) RuntimeOption {
 	return func(rtOpts *runtimeOptions) {
@@ -67,7 +66,7 @@ func WithRegPoolSize(sz uint) RuntimeOption {
 }
 
 // WithRegSetMaxAge sets the max age of a register set when creating a new
-// Runtime.  The default max age is 10.
+// Runtime. The default max age is 10.
 func WithRegSetMaxAge(age uint) RuntimeOption {
 	return func(rtOpts *runtimeOptions) {
 		rtOpts.regSetMaxAge = age
@@ -80,6 +79,24 @@ func WithRuntimeContext(def RuntimeContextDef) RuntimeOption {
 	}
 }
 
+// WithReservedGlobal makes "global" a reserved keyword in the scanner.
+// By default "global" is a context-sensitive soft keyword handled by the
+// parser, matching Lua 5.5 with LUA_COMPAT_GLOBAL defined.
+func WithReservedGlobal() RuntimeOption {
+	return func(rtOpts *runtimeOptions) {
+		rtOpts.reservedGlobal = true
+	}
+}
+
+// WithPoolFactory sets the factory function used to create weak reference
+// pools. Each isolated runtime context gets its own pool via this factory.
+// If not specified, the best available pool is chosen automatically.
+func WithPoolFactory(f func() luagc.Pool) RuntimeOption {
+	return func(rtOpts *runtimeOptions) {
+		rtOpts.poolFactory = f
+	}
+}
+
 // New returns a new pointer to a Runtime with the given stdout.
 func New(stdout io.Writer, opts ...RuntimeOption) *Runtime {
 	rtOpts := defaultRuntimeOptions
@@ -87,13 +104,14 @@ func New(stdout io.Writer, opts ...RuntimeOption) *Runtime {
 		opt(&rtOpts)
 	}
 	r := &Runtime{
-		globalEnv: NewTable(),
-		Stdout:    stdout,
-		registry:  NewTable(),
-		warner:    NewLogWarner(os.Stderr, "Lua warning: "),
-		regPool:   mkValuePool(rtOpts.regPoolSize, rtOpts.regSetMaxAge),
-		argsPool:  mkValuePool(rtOpts.regPoolSize, rtOpts.regSetMaxAge),
-		cellPool:  mkCellPool(rtOpts.regPoolSize, rtOpts.regSetMaxAge),
+		globalEnv:      NewTable(),
+		Stdout:         stdout,
+		registry:       NewTable(),
+		warner:         NewLogWarner(os.Stderr, "Lua warning: "),
+		reservedGlobal: rtOpts.reservedGlobal,
+		regPool:        mkValuePool(rtOpts.regPoolSize, rtOpts.regSetMaxAge),
+		argsPool:       mkValuePool(rtOpts.regPoolSize, rtOpts.regSetMaxAge),
+		cellPool:       mkCellPool(rtOpts.regPoolSize, rtOpts.regSetMaxAge),
 	}
 
 	mainThread := NewThread(r)
@@ -104,6 +122,11 @@ func New(stdout io.Writer, opts ...RuntimeOption) *Runtime {
 	gcThread.status = ThreadOK
 	r.gcThread = gcThread
 
+	if rtOpts.poolFactory != nil {
+		r.poolFactory = rtOpts.poolFactory
+	} else {
+		r.poolFactory = luagc.DefaultPoolFactory()
+	}
 	r.runtimeContextManager.initRoot()
 
 	if rtOpts.runtimeContextDef != nil {
@@ -238,6 +261,7 @@ func (r *Runtime) runFinalizers(refs []luagc.Value) {
 func (t *Thread) CollectGarbage() {
 	if t != t.gcThread {
 		runtime.GC()
+		runtime.GC() // Ensure AddCleanup callbacks from the first cycle have run
 		t.runPendingFinalizers()
 	}
 }
@@ -270,7 +294,6 @@ func (r *Runtime) Close(err *error) {
 		}
 	}()
 	r.runFinalizers(r.weakRefPool.ExtractAllMarkedFinalize())
-	return
 }
 
 // Metatable returns the metatalbe of v (looking for '__metatable' in the raw

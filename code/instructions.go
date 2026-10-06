@@ -219,6 +219,22 @@ func FillTable(r1, r2 Reg, i int) Opcode {
 	return mkType6(On, r1, r2, Index8FromInt(i))
 }
 
+// MkVarargTable encodes dst <- mkvargtable(etc)
+//
+// Creates a table whose array part points to the vararg data in etc.
+// This allows modifications to the table to affect what ... expands to (Lua 5.5).
+func MkVarargTable(dst, etc Reg) Opcode {
+	return mkType4a(Off, OpMkVarargTable, dst, etc)
+}
+
+// CheckNotDefined encodes checknotdef rTable[rIndex]
+//
+// Errors with "global 'name' already defined" if rTable[rIndex] is non-nil.
+// Used by "global x = value" declarations (Lua 5.5).
+func CheckNotDefined(rTable, rIndex Reg) Opcode {
+	return mkType4a(Off, OpCheckNotDefined, rTable, rIndex)
+}
+
 // PrepForLoop makes sure rStart, rStep, rStop are all numbers and converts
 // rStart and rStep to the same numeric type. If the for loop should already
 // stop then rStart is set to nil

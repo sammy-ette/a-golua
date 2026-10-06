@@ -11,6 +11,15 @@ import (
 	rt "github.com/arnodel/golua/runtime"
 )
 
+type mathKeyType struct{}
+
+var mathKey = rt.AsValue(mathKeyType{})
+
+// mathData holds per-runtime state for the math library.
+type mathData struct {
+	rng *rand.Rand
+}
+
 var LibLoader = packagelib.Loader{
 	Load: load,
 	Name: "math",
@@ -36,6 +45,8 @@ func load(r *rt.Runtime) (rt.Value, func()) {
 		r.SetEnvGoFunc(pkg, "exp", exp, 1, false),
 		r.SetEnvGoFunc(pkg, "floor", floor, 1, false),
 		r.SetEnvGoFunc(pkg, "fmod", fmod, 2, false),
+		r.SetEnvGoFunc(pkg, "frexp", frexp, 1, false),
+		r.SetEnvGoFunc(pkg, "ldexp", ldexp, 2, false),
 		r.SetEnvGoFunc(pkg, "log", log, 2, false),
 		r.SetEnvGoFunc(pkg, "max", max, 1, true),
 		r.SetEnvGoFunc(pkg, "min", min, 1, true),
@@ -50,6 +61,10 @@ func load(r *rt.Runtime) (rt.Value, func()) {
 		r.SetEnvGoFunc(pkg, "type", typef, 1, false),
 		r.SetEnvGoFunc(pkg, "ult", ult, 2, false),
 	)
+
+	// Store per-runtime math state in the registry with a random initial seed.
+	r.SetRegistry(mathKey, rt.AsValue(&mathData{}))
+	setRandSeed(r, cryptoRandSeed())
 
 	return rt.TableValue(pkg), nil
 }
@@ -307,8 +322,8 @@ func rad(t *rt.Thread, c *rt.GoCont) (rt.Cont, error) {
 	return c.PushingNext1(t.Runtime, y), nil
 }
 
-// TODO: have a per runtime random generator
 func random(t *rt.Thread, c *rt.GoCont) (rt.Cont, error) {
+	rng := getRand(t.Runtime)
 	var (
 		err error
 		m   int64 = 1
@@ -316,12 +331,12 @@ func random(t *rt.Thread, c *rt.GoCont) (rt.Cont, error) {
 	)
 	switch c.NArgs() {
 	case 0:
-		return c.PushingNext1(t.Runtime, rt.FloatValue(rand.Float64())), nil
+		return c.PushingNext1(t.Runtime, rt.FloatValue(rng.Float64())), nil
 	case 1:
 		n, err = c.IntArg(0)
 		// Special case, new in Lua 5.4: math.random(0) returns a uniform integer.
 		if n == 0 {
-			return c.PushingNext1(t.Runtime, rt.IntValue(int64(rand.Uint64()))), nil
+			return c.PushingNext1(t.Runtime, rt.IntValue(int64(rng.Uint64()))), nil
 		}
 	case 2:
 		m, err = c.IntArg(0)
@@ -339,15 +354,15 @@ func random(t *rt.Thread, c *rt.GoCont) (rt.Cont, error) {
 	if m <= 0 && m+math.MaxInt64 < n {
 		// There's >= 50% chance the loop stops at each iteration so we're OK!
 		for {
-			r = int64(rand.Uint64())
+			r = int64(rng.Uint64())
 			if r >= m && r <= n {
 				break
 			}
 		}
 	} else if m+math.MaxInt64 == n {
-		r = rand.Int63()
+		r = rng.Int63()
 	} else {
-		r = rand.Int63n(n - m + 1)
+		r = rng.Int63n(n - m + 1)
 	}
 	return c.PushingNext1(t.Runtime, rt.IntValue(m+r)), nil
 }
@@ -359,11 +374,7 @@ func randomseed(t *rt.Thread, c *rt.GoCont) (rt.Cont, error) {
 	)
 	switch c.NArgs() {
 	case 0:
-		// We need something as random as possible to make a seed.
-		readErr := binary.Read(crypto.Reader, binary.LittleEndian, &seed)
-		if readErr != nil {
-			return nil, errors.New("unable to get random seed")
-		}
+		seed = cryptoRandSeed()
 	case 1:
 		seed, err = c.IntArg(0)
 		if err != nil {
@@ -381,7 +392,7 @@ func randomseed(t *rt.Thread, c *rt.GoCont) (rt.Cont, error) {
 		// In Go the seed is only 64 bits so we mangle the seeds
 		seed ^= seed2
 	}
-	rand.Seed(seed)
+	setRandSeed(t.Runtime, seed)
 	return c.PushingNext(t.Runtime, rt.IntValue(seed), rt.IntValue(0)), nil
 }
 
@@ -460,4 +471,55 @@ func ult(t *rt.Thread, c *rt.GoCont) (rt.Cont, error) {
 	}
 	lt := rt.BoolValue(uint64(x) < uint64(y))
 	return c.PushingNext1(t.Runtime, lt), nil
+}
+
+func frexp(t *rt.Thread, c *rt.GoCont) (rt.Cont, error) {
+	if err := c.Check1Arg(); err != nil {
+		return nil, err
+	}
+	x, err := c.FloatArg(0)
+	if err != nil {
+		return nil, err
+	}
+	m, e := math.Frexp(x)
+	return c.PushingNext(t.Runtime, rt.FloatValue(m), rt.IntValue(int64(e))), nil
+}
+
+func ldexp(t *rt.Thread, c *rt.GoCont) (rt.Cont, error) {
+	if err := c.CheckNArgs(2); err != nil {
+		return nil, err
+	}
+	x, err := c.FloatArg(0)
+	if err != nil {
+		return nil, err
+	}
+	e, err := c.IntArg(1)
+	if err != nil {
+		return nil, err
+	}
+	m := math.Ldexp(x, int(e))
+	return c.PushingNext1(t.Runtime, rt.FloatValue(m)), nil
+}
+
+//
+// Helper functions for manipulating mathData and managing randomness
+//
+
+func getMathData(r *rt.Runtime) *mathData {
+	return r.Registry(mathKey).Interface().(*mathData)
+}
+
+func getRand(r *rt.Runtime) *rand.Rand {
+	return getMathData(r).rng
+}
+
+func setRandSeed(r *rt.Runtime, seed int64) {
+	d := getMathData(r)
+	d.rng = rand.New(rand.NewSource(seed))
+}
+
+func cryptoRandSeed() int64 {
+	var seed int64
+	binary.Read(crypto.Reader, binary.LittleEndian, &seed)
+	return seed
 }

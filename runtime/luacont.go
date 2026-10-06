@@ -302,9 +302,13 @@ RunLoop:
 				case code.OpId:
 					res = val
 				case code.OpEtcId:
-					// We assume it's a push?
 					cont := getReg(regs, cells, dst).AsCont()
-					cont.PushEtc(t.Runtime, val.AsArray())
+					var etc []Value
+					etc, err = expandVarargs(val)
+					if err != nil {
+						break
+					}
+					cont.PushEtc(t.Runtime, etc)
 					pc++
 					continue RunLoop
 				case code.OpTruth:
@@ -315,6 +319,24 @@ RunLoop:
 					// TODO: wasteful as we already have got getReg
 					cell := c.getRegCell(opcode.GetB())
 					getReg(regs, cells, dst).AsClosure().AddUpvalue(cell)
+					pc++
+					continue RunLoop
+				case code.OpMkVarargTable:
+					tbl := TableValue(newVarargTable(val.AsArray()))
+					// Overwrite the etc register so ... expansion reads from
+					// the table (respecting t.n modifications).
+					setReg(regs, cells, opcode.GetB(), tbl)
+					res = tbl
+				case code.OpCheckNotDefined:
+					// Lua 5.5: check that table[index] is not already defined.
+					// Used by "global x = value" declarations.
+					table := getReg(regs, cells, dst) // rA = table (_ENV)
+					// val is rB = index (name)
+					tbl := table.AsTable()
+					if tbl != nil && !tbl.Get(val).IsNil() {
+						c.pc = pc
+						return nil, fmt.Errorf("global '%s' already defined", val.AsString())
+					}
 					pc++
 					continue RunLoop
 				default:
@@ -434,18 +456,22 @@ RunLoop:
 			}
 		case code.Type6Pfx:
 			dst := opcode.GetA()
-			etc := getReg(regs, cells, opcode.GetB()).AsArray()
-			idx := int(opcode.GetM())
-			var val Value
-			if idx < len(etc) {
-				val = etc[idx]
+			etc, etcErr := expandVarargs(getReg(regs, cells, opcode.GetB()))
+			if etcErr != nil {
+				c.pc = pc
+				return nil, etcErr
 			}
+			idx := int(opcode.GetM())
 			if opcode.GetF() {
 				tbl := getReg(regs, cells, dst).AsTable()
 				for i, v := range etc {
 					t.SetTable(tbl, IntValue(int64(i+idx)), v)
 				}
 			} else {
+				var val Value
+				if idx < len(etc) {
+					val = etc[idx]
+				}
 				setReg(regs, cells, dst, val)
 			}
 			pc++
@@ -581,3 +607,5 @@ func getReg(regs []Value, cells []Cell, reg code.Reg) Value {
 	}
 	return regs[reg.Idx()]
 }
+
+

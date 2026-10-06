@@ -94,6 +94,17 @@ func TestScanner(t *testing.T) {
 			},
 			"",
 		},
+		{
+			`global x local y`,
+			[]tok{
+				{token.IDENT, "global", 0, 1, 1},
+				{token.IDENT, "x", 7, 1, 8},
+				{token.KwLocal, "local", 9, 1, 10},
+				{token.IDENT, "y", 15, 1, 16},
+				{token.EOF, "", 16, 1, 17},
+			},
+			"",
+		},
 		// Token errors
 		{
 			`abc?xyz`,
@@ -226,6 +237,30 @@ func TestScanner(t *testing.T) {
 			}
 			if scanner.ErrorMsg() != test.err {
 				t.Fatalf("Wrong error message: expected %q, got %q", test.err, scanner.ErrorMsg())
+			}
+		})
+	}
+}
+
+func TestReservedGlobal(t *testing.T) {
+	tests := []struct {
+		name     string
+		reserved bool
+		wantType token.Type
+	}{
+		{"soft keyword (default)", false, token.IDENT},
+		{"reserved keyword", true, token.KwGlobal},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var opts []Option
+			if tt.reserved {
+				opts = append(opts, WithReservedGlobal())
+			}
+			s := New("test", []byte(`global x`), opts...)
+			tok := s.Scan()
+			if tok.Type != tt.wantType {
+				t.Fatalf("expected token type %d, got %d", tt.wantType, tok.Type)
 			}
 		})
 	}

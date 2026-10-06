@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math"
 	"strconv"
+	"strings"
 	"unsafe"
 )
 
@@ -116,9 +117,9 @@ func (v Value) Equals(v2 Value) bool {
 // Hash returns a hash for the value.
 func (v Value) Hash() uintptr {
 	if v.scalar != 0 {
-		return goRuntimeInt64Hash(v.scalar, 0)
+		return hashScalar(v.scalar, 0)
 	}
-	return goRuntimeEfaceHash(v.iface, 0)
+	return hashInterface(v.iface, 0)
 }
 
 // IntValue returns a Value holding the given arg.
@@ -297,7 +298,7 @@ func (v Value) ToString() (string, bool) {
 	case int64:
 		return strconv.FormatInt(v.AsInt(), 10), true
 	case float64:
-		return strconv.FormatFloat(v.AsFloat(), 'g', -1, 64), true
+		return FloatToString(v.AsFloat()), true
 	case bool:
 		return strconv.FormatBool(v.AsBool()), false
 	case string:
@@ -327,6 +328,16 @@ func getName(defaultName string, meta *Table) string {
 		}
 	}
 	return defaultName
+}
+
+// FloatToString formats a float64 for Lua, ensuring whole numbers include
+// ".0" to distinguish them from integers.
+func FloatToString(x float64) string {
+	s := strconv.FormatFloat(x, 'g', -1, 64)
+	if !strings.ContainsAny(s, ".eEnN") {
+		s += ".0"
+	}
+	return s
 }
 
 // NumberType return the ValueType of v if it is a number, otherwise
