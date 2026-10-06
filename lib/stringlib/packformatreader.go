@@ -50,7 +50,7 @@ func (p *packFormatReader) getOptSize() bool {
 		c := p.format[p.i]
 		if c >= '0' && c <= '9' {
 			ok = true
-			if n > maxDecuplable {
+			if uint64(n) > maxDecuplable {
 				p.err = errOverflow
 				return false
 			}
