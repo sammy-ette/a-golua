@@ -363,60 +363,6 @@ func rename(t *rt.Thread, c *rt.GoCont) (rt.Cont, error) {
 	return c.PushingNext1(t.Runtime, rt.BoolValue(true)), nil
 }
 
-func execute(t *rt.Thread, c *rt.GoCont) (rt.Cont, error) {
-	if err := c.Check1Arg(); err != nil {
-		return nil, err
-	}
-	cm, err := c.StringArg(0)
-	if err != nil {
-		return nil, err
-	}
-	// this is what gopher-lua does, so i just copied it
-	var procAttr os.ProcAttr
-	procAttr.Files = []*os.File{os.Stdin, os.Stdout, os.Stderr}
-	cmd, args := cmdArgs(cm)
-	args = append([]string{cmd}, args...)
-	process, err := os.StartProcess(cmd, args, &procAttr)
-	if err != nil {
-		return nil, err
-	}
-
-	ps, err := process.Wait()
-	if err != nil {
-		return nil, err
-	}
-
-	success := rt.BoolValue(true)
-	if !ps.Success() {
-		success = rt.BoolValue(false)
-	}
-
-	exit := rt.StringValue("exit")
-	code := rt.IntValue(int64(ps.ExitCode()))
-	if !ps.Exited() {
-		// terminated by signal
-		exit = rt.StringValue("signal")
-		if runtime.GOOS != "windows" {
-			// i am not sure how this is on windows...
-			ws := ps.Sys().(syscall.WaitStatus)
-			sig := ws.Signal()
-			code = rt.IntValue(int64(sig)) // syscall signal, which is an int
-		}
-	}
-
-	return c.PushingNext(t.Runtime, success, exit, code), nil
-}
-
-func cmdArgs(arg string) (string, []string) {
-	cmd := "/bin/sh"
-	args := []string{"-c"}
-	if runtime.GOOS == "windows" {
-		cmd = "C:\\Windows\\system32\\cmd.exe"
-		args = []string{"/c"}
-	}
-	args = append(args, arg)
-	return cmd, args
-}
 //
 // Utils
 //
